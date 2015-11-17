@@ -1,0 +1,200 @@
+---
+title: "Machine Learning Course Project"
+author: "Angus Chadney"
+date: "17 November 2015"
+output: html_document
+subtitle: Weight Lifting Exercise Prediction
+---
+
+## Introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Task
+"The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases."
+
+### Data
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+### Citation
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+## Code Time
+
+### Initialisation
+```{r, cache=TRUE}
+# Libraries
+library(caret)
+library(rattle)
+library(rpart)
+library(randomForest)
+
+# Set random num seed
+set.seed(123)
+
+# Max number of na's we're allowing in the train dataset columns (used later)
+max_na <- 19200
+```
+
+### Getting the data
+```{r, cache=TRUE}
+# Grab the files from the interwebs
+url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+#download.file(url=url_train, destfile=pml-training.csv)
+url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+#download.file(url=url_test, destfile=pml-testing.csv)
+
+# Load the files in to R, na strings obtained from observation
+train_data <- read.csv("./pml-training.csv", na.strings = c("NA", "", "#DIV/0!"))
+test_data <- read.csv("./pml-testing.csv", na.strings = c("NA", "", "#DIV/0!"))
+
+# Remove those columns in the train dataset that have too many NAs.  19200 was chosen by observation
+train_data <- train_data[, apply(train_data, 2, function(x) sum(is.na(x)) <= max_na)]
+
+# Get rid of the non-numeric columns at the start (timestamp etc.)
+train_data <- train_data[, 8:60]
+
+# Coerce all columns but "classe" in the train dataset to numeric (read.csv makes them factors and ints as well)
+train_data[, -53] <- sapply(train_data[, -53], as.numeric)
+
+# Make sure that the test data is using the same columns
+test_data <- test_data[, which(names(test_data) %in% names(train_data))]
+
+```
+
+### Preprocessing
+Firstly, lets use the nearZeroVar function to check if there are any features that have very little variance, and will therefore not contribute very much to the prediction function.
+```{r, cache=TRUE}
+nsv <- nearZeroVar(train_data, saveMetrics=TRUE)
+nsv
+```
+Looks good!  There don't seem to be any variables that we should be excluding.
+
+Secondly, lets have a look at the cross correlation between the features.  
+```{r, cache=TRUE}
+cor_cols <- findCorrelation(cor(train_data[,-53]), cutoff=0.95)
+names(train_data[, cor_cols])
+```
+Okay, these variables are highly correlated, lets remove them.
+```{r, cache=TRUE}
+train_data <- train_data[, -cor_cols]
+test_data <- test_data[, -cor_cols]
+```
+
+
+### Creating partitions
+I chose to split the dataset up into 4 equal parts.  Mainly so the algo's aren't so slow, but also to give me two training sets, and two equal sized test sets for cross-validation.
+```{r, cache=TRUE}
+# Split off 25% (leaving 75% of total)
+idx <- createDataPartition(train_data$classe, p=1/4, list=FALSE)
+train1 <- train_data[idx,]
+temp_data <- train_data[-idx,]
+# Split off 33% (leaving 50% of total)
+idx <- createDataPartition(temp_data$classe, p=1/3, list=FALSE)
+train2 <- temp_data[idx,]
+temp_data <- temp_data[-idx,]
+# Split off 50% (leaving 25% of total)
+idx <- createDataPartition(temp_data$classe, p=1/2, list=FALSE)
+test1 <- temp_data[idx,]
+test2 <- temp_data[-idx,]
+```
+
+### Algorithm 1 - Standard classification tree
+As this is a classification of a factor variable problem, the go-to algo should be the standard classification tree.  I will create a model using the $train1$ set, predict the outcome on $test1$, then compute the out of sample error by using the confusionMatrix.
+Please refer to the appendix for a fancy plot showing the decision tree model.
+```{r, cache=TRUE}
+# Standard classification tree algo
+modFit1 <- rpart(classe ~ ., data=train1, method="class")
+pred1 <- predict(modFit1, test1, type="class")
+cm1 <- confusionMatrix(pred1, test1$classe)
+
+# Print confusion matrix
+cm1$table
+
+# Extract the accuracy from the confusionMatrix
+acc1 <- cm1$overall[1]
+# Out of sample error rate is 1 - accuracy
+err1 <- 1 - acc1
+print(paste0('Out of sample error rate on test1: ', round(err1, 3)*100, '%'))
+```
+Now let's cross validate by running the same analysis on $train2$ / $test2$, and averaging the results.
+```{r, cache=TRUE}
+# Standard classification tree algo
+modFit2 <- rpart(classe ~ ., data=train2, method="class")
+pred2 <- predict(modFit2, test2, type="class")
+cm2 <- confusionMatrix(pred2, test2$classe)
+
+# Print confusion matrix
+cm2$table
+
+# Extract the accuracy from the confusionMatrix
+acc2 <- cm2$overall[1]
+# Out of sample error rate is 1 - accuracy
+err2 <- 1 - acc2
+print(paste0('Out of sample error rate on test1: ', round(err2, 3)*100, '%\n'))
+print(paste0('Average out of sample error rate: ', round(mean(c(err1, err2)), 3)*100, '%\n'))
+```
+
+### Algorithm 2 - Random forest
+Random forest should give us slightly better accuracy.  I will use the same parameters and methodology as before, but this time with the randomForest algorithm.
+```{r, cache=TRUE}
+# Standard classification tree algo
+modFit3 <- randomForest(classe ~ ., data=train1, method="class")
+pred3 <- predict(modFit3, test1, type="class")
+cm3 <- confusionMatrix(pred3, test1$classe)
+
+# Print confusion matrix
+cm3$table
+
+# Extract the accuracy from the confusionMatrix
+acc3 <- cm3$overall[1]
+# Out of sample error rate is 1 - accuracy
+err3 <- 1 - acc3
+print(paste0('Out of sample error rate on test1: ', round(err3, 3)*100, '%'))
+```
+Cross validating again by running the same analysis on $train2$ / $test2$, and averaging the results.
+```{r, cache=TRUE}
+# Standard classification tree algo
+modFit4 <- randomForest(classe ~ ., data=train2, method="class")
+pred4 <- predict(modFit4, test2, type="class")
+cm4 <- confusionMatrix(pred4, test2$classe)
+
+# Print confusion matrix
+cm4$table
+
+# Extract the accuracy from the confusionMatrix
+acc4 <- cm4$overall[1]
+# Out of sample error rate is 1 - accuracy
+err4 <- 1 - acc4
+print(paste0('Out of sample error rate on test1: ', round(err4, 3)*100, '%'))
+print(paste0('Average out of sample error rate: ', round(mean(c(err3, err4)), 3)*100, '%\n'))
+```
+
+## Predicting on test data
+Our best model (lowest out of sample error rate) was number 4, therefore we will use that to predict $classe$ for the test data.
+```{r, cache=TRUE}
+pred_on_test <- predict(modFit4, test_data, type="class")
+pred_on_test
+```
+And finally, use the below function to create the requisite output files:
+```{r, cache=TRUE}
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+
+pml_write_files(pred_on_test)
+```
+
+## Appendix
+```{r, cache=TRUE, echo=FALSE}
+fancyRpartPlot(modFit1)
+```
